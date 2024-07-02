@@ -1,0 +1,15 @@
+all:
+  hosts:
+    host1:
+      ansible_user: kali
+      ansible_ssh_pass: kali
+      ansible_host: 192.168.88.177
+  vars:
+    POSTGRES_VERSION: 16
+    DB_HOST: 192.168.88.177
+    DB_PORT: 5432
+    DB_USER: postgres
+    DB_PASSWORD: Qq12345
+    DB_DATABASE: practica2
+    WORKDIR: /home/kali/ansible
+    HOST_USER: kali

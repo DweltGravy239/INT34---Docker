@@ -1,0 +1,175 @@
+- name: Basic configuration and PostgreSQL installation
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Add PostgreSQL APT repository key
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+      become: yes
+
+    - name: Add PostgreSQL repository
+      apt_repository:
+        repo: "deb http://apt.postgresql.org/pub/repos/apt/ buster-pgdg main"
+        state: present
+      become: yes
+
+    - name: Update all packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+      become: yes
+
+    - name: Install necessary packages
+      apt:
+        pkg:
+        - libpq-dev
+        - python3-dev
+        - gcc
+        - git
+        - python3-pip
+        - "postgresql-{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}"
+        - sysstat
+        - ufw
+        - fail2ban
+        - ntp
+      become: yes
+
+    - name: Configure UFW to allow OpenSSH
+      ufw:
+        rule: allow
+        name: OpenSSH
+      become: yes
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+      become: yes
+
+    - name: Ensure fail2ban is running
+      service:
+        name: fail2ban
+        state: started
+        enabled: true
+      become: yes
+
+    - name: Configure NTP
+      service:
+        name: ntp
+        state: started
+        enabled: true
+      become: yes
+
+    - name: Ensure psycopg2 is installed
+      pip:
+        name: psycopg2
+      become: yes
+
+    - name: Ensure postgres user exists
+      become: yes
+      user:
+        name: "{{ hostvars[inventory_hostname]['DB_USER'] }}"
+        state: present
+        system: yes
+        password: "{{ hostvars[inventory_hostname]['DB_PASSWORD'] }}"
+
+    - name: Grant superuser privileges to postgres user
+      become: yes
+      become_user: postgres
+      postgresql_user:
+        name: "{{ hostvars[inventory_hostname]['DB_USER'] }}"
+        role_attr_flags: "SUPERUSER"
+
+- name: Install and configure PostgreSQL on host1
+  hosts: host1
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Ensure PostgreSQL is installed
+      apt:
+        name: "postgresql-{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}"
+        state: present
+
+    - name: Ensure PostgreSQL is running
+      service:
+        name: postgresql
+        state: started
+
+    - name: Install additional packages
+      apt:
+        pkg:
+        - git
+        - python3-pip
+        - postgresql-contrib
+        - postgresql-common
+        - sysstat
+
+    - name: Change postgres password
+      become: yes
+      become_user: postgres
+      command: psql -c "ALTER USER {{ hostvars[inventory_hostname]['DB_USER'] }} WITH PASSWORD '{{ hostvars[inventory_hostname]['DB_PASSWORD'] }}';"
+
+    - name: Configure postgresql.conf
+      become: yes
+      become_user: postgres
+      blockinfile:
+        path: "/etc/postgresql/{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}/main/postgresql.conf"
+        block: |
+          listen_addresses = '*'
+          port = {{ hostvars[inventory_hostname]['DB_PORT'] }}
+          max_wal_senders=10
+          wal_level=replica
+          wal_log_hints = on
+          hot_standby=on
+          max_replication_slots=10
+          hot_standby_feedback=on
+          log_replication_commands=on
+      register: postgresql_conf_changed
+
+    - name: Configure pg_hba.conf
+      become: yes
+      become_user: postgres
+      blockinfile:
+        path: "/etc/postgresql/{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}/main/pg_hba.conf"
+        block: |
+          local all postgres md5
+          host replication all {{ hostvars[inventory_hostname]['DB_HOST'] }}/32 scram-sha-256
+          host all all 0.0.0.0/0 md5
+      register: pg_hba_conf_changed
+
+    - name: Apply PostgreSQL configuration changes
+      service:
+        name: postgresql
+        state: restarted
+      when: postgresql_conf_changed is changed or pg_hba_conf_changed is changed
+
+    - name: Check if PostgreSQL is running
+      become: yes
+      become_user: postgres
+      shell: "pg_isready -q"
+      register: postgresql_running
+      changed_when: false
+      failed_when: false
+
+    - name: Create database if not exists
+      become: yes
+      become_user: postgres
+      postgresql_db:
+        name: "{{ hostvars[inventory_hostname]['DB_DATABASE'] }}"
+        state: present
+      when: postgresql_running is success
+
+    - name: Ensure log file is readable
+      file:
+        path: /var/log/postgresql/postgresql-{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}-main.log
+        mode: '0644'
+
+    - name: Verify PostgreSQL is working
+      become: yes
+      become_user: postgres
+      command: psql -c "SELECT version();"
+      register: postgres_version
+      changed_when: false
+
+    - debug:
+        var: postgres_version.stdout
